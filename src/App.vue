@@ -40,6 +40,18 @@ const dragX = ref<number | null>(null)
 const dragY = ref<number | null>(null)
 const dragType = ref<EntityType | null>(null)
 const dragMoveId = ref<string | null>(null)
+const viewportRef = ref<HTMLElement | null>(null)
+const viewportTranslate = ref({ x: 0, y: 0 })
+const isPanning = ref(false)
+const lastPointerPosition = ref({ x: 0, y: 0 })
+const lastTouchDist = ref(0)
+const isPinching = ref(false)
+
+const boardStyle = computed(() => ({
+  transform: `translate(${viewportTranslate.value.x}px, ${viewportTranslate.value.y}px) scale(${viewportScale.value})`,
+  transition: (isPanning.value || isPinching.value) ? 'none' : 'transform 0.4s cubic-bezier(0.2, 0.8, 0.2, 1)',
+  transformOrigin: 'center center'
+}))
 
 const gridCellsMap = computed(() => {
   const map: Record<string, string> = {}
@@ -217,6 +229,61 @@ const handleDrop = (e: DragEvent, x: number, y: number) => {
     if (id) moveEntity(id, x, y)
   }
   handleDragEnd()
+}
+
+// Mobile Viewport Controls
+const handleTouchStart = (e: TouchEvent) => {
+  if (e.touches.length === 1) {
+    // Only allow panning if not touching an entity or if dragging is not active
+    const target = e.target as HTMLElement
+    if (!target.closest('[draggable="true"]')) {
+      isPanning.value = true
+      lastPointerPosition.value = { x: e.touches[0].clientX, y: e.touches[0].clientY }
+    }
+  } else if (e.touches.length === 2) {
+    isPinching.value = true
+    lastTouchDist.value = Math.hypot(
+      e.touches[0].pageX - e.touches[1].pageX,
+      e.touches[0].pageY - e.touches[1].pageY
+    )
+  }
+}
+
+const handleTouchMove = (e: TouchEvent) => {
+  if (isPanning.value && e.touches.length === 1) {
+    const dx = e.touches[0].clientX - lastPointerPosition.value.x
+    const dy = e.touches[0].clientY - lastPointerPosition.value.y
+    viewportTranslate.value.x += dx
+    viewportTranslate.value.y += dy
+    lastPointerPosition.value = { x: e.touches[0].clientX, y: e.touches[0].clientY }
+  } else if (isPinching.value && e.touches.length === 2) {
+    const dist = Math.hypot(
+      e.touches[0].pageX - e.touches[1].pageX,
+      e.touches[0].pageY - e.touches[1].pageY
+    )
+    const delta = dist / lastTouchDist.value
+    const newScale = Math.max(0.3, Math.min(3, viewportScale.value * (1 + (delta - 1) * 1.5)))
+    viewportScale.value = newScale
+    lastTouchDist.value = dist
+  }
+}
+
+const handleTouchEnd = () => {
+  isPanning.value = false
+  isPinching.value = false
+}
+
+const resetView = () => {
+  viewportTranslate.value = { x: 0, y: 0 }
+  viewportScale.value = 1
+}
+
+const handleWheel = (e: WheelEvent) => {
+  if (e.ctrlKey || e.metaKey) {
+    e.preventDefault()
+    const delta = -e.deltaY * 0.01
+    viewportScale.value = Math.max(0.3, Math.min(3, viewportScale.value + delta))
+  }
 }
 
 const selectEntity = (id: string | null) => {
@@ -513,16 +580,25 @@ const zoomOut = () => { if(viewportScale.value > 0.5) viewportScale.value -= 0.1
 
       <!-- Zoom Controls -->
       <div class="fixed bottom-24 right-4 flex flex-col gap-2 z-40">
-         <button @click="zoomIn" class="w-10 h-10 bg-white border border-slate-200 shadow-sm rounded-sm flex items-center justify-center font-bold text-lg hover:bg-slate-50 transition-colors">+</button>
-         <button @click="zoomOut" class="w-10 h-10 bg-white border border-slate-200 shadow-sm rounded-sm flex items-center justify-center font-bold text-lg hover:bg-slate-50 transition-colors">-</button>
+         <button @click="zoomIn" class="w-10 h-10 bg-white border border-slate-200 shadow-sm rounded-sm flex items-center justify-center font-bold text-lg hover:bg-slate-50 transition-all active:scale-90">+</button>
+         <button @click="zoomOut" class="w-10 h-10 bg-white border border-slate-200 shadow-sm rounded-sm flex items-center justify-center font-bold text-lg hover:bg-slate-50 transition-all active:scale-90">-</button>
+         <button @click="resetView" class="w-10 h-10 bg-white border border-slate-200 shadow-sm rounded-sm flex items-center justify-center font-bold text-lg hover:bg-slate-50 transition-all active:scale-90">🏠</button>
       </div>
 
       <!-- Board Container (Top-down view) -->
-      <div class="flex-1 w-full overflow-auto flex items-center justify-center p-12 lg:p-24 hide-scrollbar scroll-smooth">
-          <div class="relative transition-transform duration-300 ease-out"
-               :style="{ transform: `scale(${viewportScale})` }">
-               
-               <div class="grid relative bg-white border border-slate-300 select-none touch-none shadow-[15px_15px_30px_rgba(0,0,0,0.05)]"
+      <div 
+        ref="viewportRef"
+        class="flex-1 w-full overflow-hidden flex items-center justify-center p-12 lg:p-24 hide-scrollbar select-none touch-none"
+        @touchstart="handleTouchStart"
+        @touchmove="handleTouchMove"
+        @touchend="handleTouchEnd"
+        @wheel.passive="handleWheel"
+      >
+          <div 
+            class="relative transform-gpu pointer-events-none"
+            :style="boardStyle"
+          >
+               <div class="grid relative bg-white border border-slate-300 select-none touch-none shadow-[15px_15px_30px_rgba(0,0,0,0.05)] pointer-events-auto"
                     :style="{ gridTemplateColumns: `repeat(${boardWidth}, minmax(0, 1fr))`, gridTemplateRows: `repeat(${boardHeight}, minmax(0, 1fr))`, width: '1333px', height: '1000px', flexShrink: 0 }">
                 
                 <!-- Grid Background -->
