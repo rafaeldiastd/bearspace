@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { supabase } from './supabase'
 
-const boardSize = ref(30)
+const boardWidth = ref(30)
+const boardHeight = ref(30)
 type EntityType = 'rally' | 'joiner' | 'member' | 'bear_trap' | 'flag' | 'hq' | 'farm' | 'statue' | 'mountain'
 
 interface Entity {
@@ -32,6 +33,7 @@ const selectedEntityId = ref<string | null>(null)
 const hoveredEntityId = ref<string | null>(null) // Canvas hover
 const listHoveredEntityId = ref<string | null>(null) // List hover
 const cityCounter = ref(1)
+const editingEntityId = ref<string | null>(null)
 
 // Drag and Drop States
 const dragX = ref<number | null>(null)
@@ -57,7 +59,7 @@ const citiesList = computed(() => {
 })
 
 const isSpaceFree = (x: number, y: number, w: number, h: number, ignoreId?: string) => {
-  if (x < 0 || y < 0 || x + w > boardSize.value || y + h > boardSize.value) return false
+  if (x < 0 || y < 0 || x + w > boardWidth.value || y + h > boardHeight.value) return false
   for (let i = 0; i < w; i++) {
     for (let j = 0; j < h; j++) {
       const occupiedBy = gridCellsMap.value[`${x + i},${y + j}`]
@@ -72,8 +74,8 @@ const addEntity = (type: EntityType, x: number, y: number, checkOverlap = true, 
   let targetX = x
   let targetY = y
 
-  if (targetX + def.w > boardSize.value) targetX = boardSize.value - def.w
-  if (targetY + def.h > boardSize.value) targetY = boardSize.value - def.h
+  if (targetX + def.w > boardWidth.value) targetX = boardWidth.value - def.w
+  if (targetY + def.h > boardHeight.value) targetY = boardHeight.value - def.h
   if (targetX < 0) targetX = 0
   if (targetY < 0) targetY = 0
 
@@ -102,6 +104,40 @@ const addEntity = (type: EntityType, x: number, y: number, checkOverlap = true, 
   return true
 }
 
+const recalculateCityNumbers = () => {
+    let count = 1
+    const cities = entities.value
+        .filter(e => ['rally', 'joiner', 'member'].includes(e.type))
+        .sort((a, b) => (a.cityNumber || 0) - (b.cityNumber || 0))
+    
+    cities.forEach(city => {
+        city.cityNumber = count++
+        // Only update name if it follows the default pattern
+        if (city.name && /^City \d+$/.test(city.name)) {
+            city.name = `City ${city.cityNumber}`
+        }
+    })
+    cityCounter.value = count
+}
+
+const deleteEntity = (id: string) => {
+    const entity = entities.value.find(e => e.id === id)
+    if (!entity) return
+    const wasCity = ['rally', 'joiner', 'member'].includes(entity.type)
+    entities.value = entities.value.filter(ent => ent.id !== id)
+    if (wasCity) {
+        recalculateCityNumbers()
+    }
+}
+
+watch([boardWidth, boardHeight], () => {
+  entities.value.forEach(ent => {
+    const def = entityDefs[ent.type]
+    if (ent.x + def.w > boardWidth.value) ent.x = Math.max(0, boardWidth.value - def.w)
+    if (ent.y + def.h > boardHeight.value) ent.y = Math.max(0, boardHeight.value - def.h)
+  })
+})
+
 const moveEntity = (id: string, newX: number, newY: number) => {
   const entity = entities.value.find(e => e.id === id)
   if (!entity) return
@@ -110,8 +146,8 @@ const moveEntity = (id: string, newX: number, newY: number) => {
   let targetX = newX
   let targetY = newY
 
-  if (targetX + def.w > boardSize.value) targetX = boardSize.value - def.w
-  if (targetY + def.h > boardSize.value) targetY = boardSize.value - def.h
+  if (targetX + def.w > boardWidth.value) targetX = boardWidth.value - def.w
+  if (targetY + def.h > boardHeight.value) targetY = boardHeight.value - def.h
   if (targetX < 0) targetX = 0
   if (targetY < 0) targetY = 0
 
@@ -123,8 +159,8 @@ const moveEntity = (id: string, newX: number, newY: number) => {
 
 const placeEntity = (type: EntityType) => {
   const def = entityDefs[type]
-  for (let y = 0; y < boardSize.value; y++) {
-    for (let x = 0; x < boardSize.value; x++) {
+  for (let y = 0; y < boardHeight.value; y++) {
+    for (let x = 0; x < boardWidth.value; x++) {
       if (isSpaceFree(x, y, def.w, def.h)) {
         addEntity(type, x, y, false)
         return
@@ -203,9 +239,10 @@ const getHoveredEntity = computed(() => {
 })
 
 const handleKeyDown = (e: KeyboardEvent) => {
+  if (editingEntityId.value) return // Don't delete while editing name
   if (e.key === 'Delete' || e.key === 'Backspace') {
     if (selectedEntityId.value) {
-      entities.value = entities.value.filter(ent => ent.id !== selectedEntityId.value)
+      deleteEntity(selectedEntityId.value)
       selectedEntityId.value = null
     }
   }
@@ -237,7 +274,16 @@ const loadConfigBySlug = async (slug: string) => {
     return
   }
 
-  entities.value = config.data
+  if (Array.isArray(config.data)) {
+    entities.value = config.data
+    boardWidth.value = 30
+    boardHeight.value = 30
+  } else if (config.data && typeof config.data === 'object') {
+    entities.value = config.data.entities || []
+    boardWidth.value = config.data.width || 30
+    boardHeight.value = config.data.height || 30
+  }
+  
   currentConfigId.value = config.id
   currentConfigSlug.value = config.read_only_slug
   isAdmin.value = false // Default to read-only when loading via slug
@@ -280,12 +326,18 @@ const saveConfig = async () => {
   }
 
   isSaving.value = true
+  const payload = {
+    entities: entities.value,
+    width: boardWidth.value,
+    height: boardHeight.value
+  }
+
   try {
     if (currentConfigId.value && isAdmin.value) {
       // Update existing
       const { error } = await supabase
         .from('board_configurations')
-        .update({ data: entities.value, updated_at: new Date() })
+        .update({ data: payload, updated_at: new Date() })
         .eq('id', currentConfigId.value)
       
       if (error) throw error
@@ -295,7 +347,7 @@ const saveConfig = async () => {
       const { data, error } = await supabase
         .from('board_configurations')
         .insert([{ 
-          data: entities.value, 
+          data: payload, 
           admin_password: savePassword.value 
         }])
         .select()
@@ -356,10 +408,14 @@ const zoomOut = () => { if(viewportScale.value > 0.5) viewportScale.value -= 0.1
                     showSidebar ? 'fixed inset-x-0 top-[65px] bottom-0 lg:static' : 'hidden lg:flex']">
       <div>
         <h3 class="text-xs font-semibold text-slate-400 mb-2 uppercase tracking-wider">Board Settings</h3>
-        <div class="space-y-3 p-3 bg-slate-50 rounded-sm border border-slate-100">
+        <div class="space-y-4 p-3 bg-slate-50 rounded-sm border border-slate-100">
            <div class="flex flex-col gap-1">
-              <label class="text-[10px] text-slate-500 font-bold uppercase">Grid Size ({{boardSize}}x{{boardSize}})</label>
-              <input type="range" v-model.number="boardSize" min="10" max="60" step="5" class="w-full h-1 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-slate-800" />
+              <label class="text-[10px] text-slate-500 font-bold uppercase">Grid Width ({{boardWidth}})</label>
+              <input type="range" v-model.number="boardWidth" min="10" max="60" step="5" class="w-full h-1 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-slate-800" />
+           </div>
+           <div class="flex flex-col gap-1">
+              <label class="text-[10px] text-slate-500 font-bold uppercase">Grid Height ({{boardHeight}})</label>
+              <input type="range" v-model.number="boardHeight" min="10" max="60" step="5" class="w-full h-1 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-slate-800" />
            </div>
         </div>
       </div>
@@ -481,15 +537,15 @@ const zoomOut = () => { if(viewportScale.value > 0.5) viewportScale.value -= 0.1
                :style="{ transform: `scale(${viewportScale})` }">
                
                <div class="grid relative bg-white border border-slate-300 select-none touch-none shadow-[15px_15px_30px_rgba(0,0,0,0.05)]"
-                    :style="{ gridTemplateColumns: `repeat(${boardSize}, minmax(0, 1fr))`, gridTemplateRows: `repeat(${boardSize}, minmax(0, 1fr))`, width: '1000px', height: '1000px', flexShrink: 0 }">
+                    :style="{ gridTemplateColumns: `repeat(${boardWidth}, minmax(0, 1fr))`, gridTemplateRows: `repeat(${boardHeight}, minmax(0, 1fr))`, width: '1000px', height: '1000px', flexShrink: 0 }">
                 
                 <!-- Grid Background -->
-                <div v-for="index in boardSize * boardSize" :key="`cell-${index}`"
-                    @dragover="handleDragOver($event, (index - 1) % boardSize, Math.floor((index - 1) / boardSize))" 
-                    @drop="handleDrop($event, (index - 1) % boardSize, Math.floor((index - 1) / boardSize))"
-                    @click="clickGridCell((index - 1) % boardSize, Math.floor((index - 1) / boardSize))"
+                <div v-for="index in boardWidth * boardHeight" :key="`cell-${index}`"
+                    @dragover="handleDragOver($event, (index - 1) % boardWidth, Math.floor((index - 1) / boardWidth))" 
+                    @drop="handleDrop($event, (index - 1) % boardWidth, Math.floor((index - 1) / boardWidth))"
+                    @click="clickGridCell((index - 1) % boardWidth, Math.floor((index - 1) / boardWidth))"
                     class="border-r border-b border-slate-50 bg-transparent relative box-border hover:bg-slate-50/50 transition-colors"
-                    :class="{'border-l border-t': index === 1, 'border-l-0': (index - 1) % boardSize !== 0, 'border-t-0': Math.floor((index - 1) / boardSize) !== 0}">
+                    :class="{'border-l border-t': index === 1, 'border-l-0': (index - 1) % boardWidth !== 0, 'border-t-0': Math.floor((index - 1) / boardWidth) !== 0}">
                 </div>
 
                 <!-- Preview Layer -->
@@ -497,10 +553,10 @@ const zoomOut = () => { if(viewportScale.value > 0.5) viewportScale.value -= 0.1
                     class="absolute pointer-events-none opacity-50 z-20 shadow-md"
                     :class="[entityDefs[dragType].class, isSpaceFree(dragX, dragY, entityDefs[dragType].w, entityDefs[dragType].h, dragMoveId || undefined) ? 'bg-emerald-300' : 'bg-rose-300']"
                     :style="{ 
-                        left: `${(dragX / boardSize) * 100}%`, 
-                        top: `${(dragY / boardSize) * 100}%`, 
-                        width: `${(entityDefs[dragType].w / boardSize) * 100}%`, 
-                        height: `${(entityDefs[dragType].h / boardSize) * 100}%` 
+                        left: `${(dragX / boardWidth) * 100}%`, 
+                        top: `${(dragY / boardHeight) * 100}%`, 
+                        width: `${(entityDefs[dragType].w / boardWidth) * 100}%`, 
+                        height: `${(entityDefs[dragType].h / boardHeight) * 100}%` 
                     }">
                 </div>
 
@@ -508,10 +564,10 @@ const zoomOut = () => { if(viewportScale.value > 0.5) viewportScale.value -= 0.1
                     <template v-for="ent in entities" :key="'effect-'+ent.id">
                         <div v-if="ent.type === 'flag'" class="absolute bg-blue-400/10 border border-blue-400/20"
                             :style="{ 
-                                left: `${(ent.x - 3) / boardSize * 100}%`, 
-                                top: `${(ent.y - 3) / boardSize * 100}%`, 
-                                width: `${7 / boardSize * 100}%`, 
-                                height: `${7 / boardSize * 100}%` 
+                                left: `${(ent.x - 3) / boardWidth * 100}%`, 
+                                top: `${(ent.y - 3) / boardHeight * 100}%`, 
+                                width: `${7 / boardWidth * 100}%`, 
+                                height: `${7 / boardHeight * 100}%` 
                             }">
                         </div>
                     </template>
@@ -521,26 +577,27 @@ const zoomOut = () => { if(viewportScale.value > 0.5) viewportScale.value -= 0.1
                 <div v-for="ent in entities" :key="ent.id" 
                     class="absolute p-[1px] transition-all transform-gpu pointer-events-none"
                     :style="{ 
-                        left: `${(ent.x / boardSize) * 100}%`, 
-                        top: `${(ent.y / boardSize) * 100}%`, 
-                        width: `${(entityDefs[ent.type].w / boardSize) * 100}%`, 
-                        height: `${(entityDefs[ent.type].h / boardSize) * 100}%`, 
+                        left: `${(ent.x / boardWidth) * 100}%`, 
+                        top: `${(ent.y / boardHeight) * 100}%`, 
+                        width: `${(entityDefs[ent.type].w / boardWidth) * 100}%`, 
+                        height: `${(entityDefs[ent.type].h / boardHeight) * 100}%`, 
                         opacity: ((listHoveredEntityId || selectedEntityId) && ent.id !== (listHoveredEntityId || selectedEntityId)) ? 0.2 : 1,
-                        zIndex: selectedEntityId === ent.id ? 50 : 10
+                        zIndex: (selectedEntityId === ent.id || hoveredEntityId === ent.id) ? 1000 : 10
                     }">
                     
                     <div draggable="true" 
                             @dragstart="handleDragStartBoard($event, ent.id)"
                             @dragend="handleDragEnd"
                             @click.stop="selectEntity(ent.id)"
-                            @mouseenter="hoveredEntityId = ent.id"
-                            @mouseleave="hoveredEntityId = null"
-                            :class="[entityDefs[ent.type].class, 'w-full h-full flex flex-col items-center justify-center cursor-move pointer-events-auto border-2 transition-transform active:scale-95 relative group', selectedEntityId === ent.id ? 'border-emerald-500 scale-105 z-50' : 'border-transparent']">
+                             @mouseenter="hoveredEntityId = ent.id"
+                             @mouseleave="hoveredEntityId = null"
+                             @dblclick.stop="ent.cityNumber ? (editingEntityId = ent.id) : null"
+                             :class="[entityDefs[ent.type].class, 'w-full h-full flex flex-col items-center justify-center cursor-move pointer-events-auto border-2 transition-transform active:scale-95 relative group', selectedEntityId === ent.id ? 'border-emerald-500 scale-105 z-50' : 'border-transparent']">
                         
                         <!-- Entity Tooltip -->
-                        <div v-if="getHoveredEntity?.id === ent.id" 
-                             class="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 z-50 pointer-events-none">
-                            <div class="bg-slate-800 text-white px-3 py-1.5 rounded-sm shadow-xl flex items-center gap-2 border border-slate-700 whitespace-nowrap">
+                        <div v-if="getHoveredEntity?.id === ent.id && editingEntityId !== ent.id" 
+                             class="absolute bottom-[calc(100%+8px)] left-1/2 -translate-x-1/2 z-[1100] pointer-events-none">
+                            <div class="bg-slate-800 text-white px-3 py-1.5 rounded-sm shadow-2xl flex items-center gap-2 border border-slate-700 whitespace-nowrap">
                                 <span class="text-[10px] font-bold uppercase tracking-widest">{{ ent.name || entityDefs[ent.type].label }}</span>
                             </div>
                             <!-- Tooltip Arrow -->
@@ -548,9 +605,20 @@ const zoomOut = () => { if(viewportScale.value > 0.5) viewportScale.value -= 0.1
                         </div>
 
                         <!-- Content stay flat-ish but recognizable -->
-                        <div class="flex flex-col items-center justify-center transform-gpu">
+                        <div class="flex flex-col items-center justify-center transform-gpu w-full px-1">
                             <span v-if="entityDefs[ent.type].icon" :class="[entityDefs[ent.type].w >= 2 ? 'text-2xl' : 'text-xs']">{{ entityDefs[ent.type].icon }}</span>
-                            <span v-if="ent.cityNumber" class="font-bold text-slate-800/60 z-10" :class="[entityDefs[ent.type].w >= 2 ? 'text-xs' : 'text-[8px]']">#{{ ent.cityNumber }}</span>
+                            
+                            <template v-if="ent.cityNumber">
+                                <input v-if="editingEntityId === ent.id" 
+                                       v-model="ent.name" 
+                                       @blur="editingEntityId = null"
+                                       @keyup.enter="editingEntityId = null"
+                                       class="w-full text-[10px] font-bold text-center bg-white/90 rounded-sm border-none focus:ring-1 focus:ring-slate-800 py-0.5 mt-1"
+                                       autofocus
+                                       @click.stop />
+                                <span v-else class="text-[10px] font-bold text-slate-800/80 truncate w-full text-center mt-0.5 leading-none">{{ ent.name }}</span>
+                                <span class="font-bold text-slate-800/40 text-[9px] mt-0.5">#{{ ent.cityNumber }}</span>
+                            </template>
                         </div>
                     </div>
                 </div>
@@ -571,7 +639,7 @@ const zoomOut = () => { if(viewportScale.value > 0.5) viewportScale.value -= 0.1
                <p v-else class="text-[10px] font-bold text-slate-500 uppercase tracking-widest">{{ entityDefs[getSelectedEntity.type].label }}</p>
              </div>
            </div>
-           <button @click="entities = entities.filter(ent => ent.id !== getSelectedEntity!.id); selectedEntityId = null" class="ml-auto p-2.5 text-rose-500 bg-rose-50 rounded-sm hover:bg-rose-100 transition-colors">
+           <button @click="deleteEntity(getSelectedEntity.id); selectedEntityId = null" class="ml-auto p-2.5 text-rose-500 bg-rose-50 rounded-sm hover:bg-rose-100 transition-colors">
               <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>
            </button>
         </div>
