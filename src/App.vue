@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { supabase } from './supabase'
 
 const boardSize = ref(30)
@@ -216,21 +216,114 @@ const clickGridCell = (x: number, y: number) => {
   selectEntity(clickedId)
 }
 
-onMounted(() => {
+const currentConfigId = ref<string | null>(null)
+const currentConfigSlug = ref<string | null>(null)
+const isAdmin = ref(true)
+const showSaveModal = ref(false)
+const showShareModal = ref(false)
+const savePassword = ref('')
+const generatedSlug = ref('')
+const isSaving = ref(false)
+
+const loadConfigBySlug = async (slug: string) => {
+  const { data: config, error } = await supabase
+    .from('board_configurations')
+    .select('*')
+    .eq('read_only_slug', slug)
+    .single()
+
+  if (error || !config) {
+    alert('Configuration not found!')
+    return
+  }
+
+  entities.value = config.data
+  currentConfigId.value = config.id
+  currentConfigSlug.value = config.read_only_slug
+  isAdmin.value = false // Default to read-only when loading via slug
+}
+
+onMounted(async () => {
   window.addEventListener('keydown', handleKeyDown)
-})
-onUnmounted(() => {
-  window.removeEventListener('keydown', handleKeyDown)
+  
+  const urlParams = new URLSearchParams(window.location.search)
+  const slug = urlParams.get('b')
+  if (slug) {
+    await loadConfigBySlug(slug)
+  }
 })
 
-const saveConfig = async () => {
-  try {
-    const { error } = await supabase.from('configurations').insert([{ data: entities.value }])
-    if (error) alert('Saved locally!')
-    else alert('Configuration saved successfully!')
-  } catch (e) {
-    alert('Mock Configuration saved successfully!')
+const unlockAdmin = async () => {
+  const password = prompt('Enter Admin Password:')
+  if (!password || !currentConfigId.value) return
+
+  const { data: config, error } = await supabase
+    .from('board_configurations')
+    .select('admin_password')
+    .eq('id', currentConfigId.value)
+    .single()
+
+  if (error || !config) return
+
+  if (config.admin_password === password) {
+    isAdmin.value = true
+    alert('Admin access granted!')
+  } else {
+    alert('Wrong password!')
   }
+}
+
+const saveConfig = async () => {
+  if (!savePassword.value && !currentConfigId.value) {
+    alert('Please enter a password to protect this board.')
+    return
+  }
+
+  isSaving.value = true
+  try {
+    if (currentConfigId.value && isAdmin.value) {
+      // Update existing
+      const { error } = await supabase
+        .from('board_configurations')
+        .update({ data: entities.value, updated_at: new Date() })
+        .eq('id', currentConfigId.value)
+      
+      if (error) throw error
+      alert('Updated successfully!')
+    } else {
+      // Create new
+      const { data, error } = await supabase
+        .from('board_configurations')
+        .insert([{ 
+          data: entities.value, 
+          admin_password: savePassword.value 
+        }])
+        .select()
+        .single()
+
+      if (error) throw error
+      
+      currentConfigId.value = data.id
+      currentConfigSlug.value = data.read_only_slug
+      generatedSlug.value = data.read_only_slug
+      showSaveModal.value = false
+      showShareModal.value = true
+    }
+  } catch (e: any) {
+    alert('Error saving: ' + e.message)
+  } finally {
+    isSaving.value = false
+  }
+}
+
+const shareLink = computed(() => {
+  const base = window.location.origin + window.location.pathname
+  return `${base}?b=${currentConfigSlug.value || generatedSlug.value}`
+})
+
+const copyToClipboard = (text: string) => {
+  navigator.clipboard.writeText(text)
+  alert('Copied to clipboard!')
 }
 
 const showSidebar = ref(false)
@@ -309,25 +402,72 @@ const zoomOut = () => { if(viewportScale.value > 0.5) viewportScale.value -= 0.1
             <input type="checkbox" v-model="hideEffectArea" class="rounded-sm w-4 h-4 text-slate-700 focus:ring-slate-500 border-gray-300" />
             Hide Areas
           </label>
-          <button @click="saveConfig" class="w-full p-3 bg-slate-800 text-white rounded-sm text-xs font-bold uppercase tracking-widest active:scale-[0.98] transition-transform">
-            💾 Save Configuration
+          <button v-if="isAdmin" @click="currentConfigId ? saveConfig() : showSaveModal = true" 
+                  :disabled="isSaving"
+                  class="w-full p-3 bg-slate-800 text-white rounded-sm text-xs font-bold uppercase tracking-widest active:scale-[0.98] transition-transform disabled:opacity-50">
+            {{ isSaving ? '⌛ Saving...' : (currentConfigId ? '💾 Update Board' : '💾 Save & Share') }}
+          </button>
+          <button v-else @click="unlockAdmin" class="w-full p-3 bg-emerald-600 text-white rounded-sm text-xs font-bold uppercase tracking-widest active:scale-[0.98] transition-transform">
+            🔑 Unlock Admin
+          </button>
+          <button v-if="currentConfigSlug" @click="showShareModal = true" class="w-full p-2 bg-slate-100 text-slate-600 rounded-sm text-[10px] font-bold uppercase border border-slate-200">
+            🔗 View Share Links
           </button>
       </div>
     </aside>
 
+    <!-- Save Modal -->
+    <div v-if="showSaveModal" class="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
+      <div class="bg-white rounded-sm shadow-2xl w-full max-w-md p-6 border border-slate-200">
+        <h2 class="text-lg font-bold mb-4 flex items-center gap-2">
+          <span class="text-2xl">🔒</span> Protect Your Board
+        </h2>
+        <p class="text-sm text-slate-500 mb-6">Create a password to manage this board later. People with the link can only view it.</p>
+        
+        <div class="space-y-4">
+          <div class="flex flex-col gap-1">
+            <label class="text-[10px] font-bold uppercase text-slate-400">Admin Password</label>
+            <input type="password" v-model="savePassword" class="w-full p-3 bg-slate-50 border border-slate-200 rounded-sm focus:border-slate-800 outline-none transition-colors" placeholder="••••••••" />
+          </div>
+          
+          <div class="flex gap-2 pt-2">
+            <button @click="showSaveModal = false" class="flex-1 p-3 text-xs font-bold uppercase tracking-wider text-slate-500 hover:bg-slate-50 rounded-sm italic">Cancel</button>
+            <button @click="saveConfig" :disabled="!savePassword" class="flex-1 p-3 bg-slate-800 text-white text-xs font-bold uppercase tracking-wider rounded-sm disabled:opacity-50">Save Board</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Share Modal -->
+    <div v-if="showShareModal" class="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
+      <div class="bg-white rounded-sm shadow-2xl w-full max-w-md p-6 border border-slate-200">
+        <h2 class="text-lg font-bold mb-4 flex items-center gap-2">
+          <span class="text-2xl">🚀</span> Board Shared!
+        </h2>
+        <p class="text-sm text-slate-500 mb-6">Your board is live. Share the link below with others.</p>
+        
+        <div class="space-y-6">
+          <div>
+            <label class="text-[10px] font-bold uppercase text-slate-400 block mb-2">Shareable Link (Read-only)</label>
+            <div class="flex gap-2">
+              <input readonly :value="shareLink" class="flex-1 p-3 bg-slate-50 border border-slate-100 rounded-sm text-xs font-mono text-slate-600 outline-none" />
+              <button @click="copyToClipboard(shareLink)" class="px-4 bg-slate-800 text-white rounded-sm text-xs font-bold flex items-center justify-center">Copy</button>
+            </div>
+          </div>
+
+          <div class="p-4 bg-amber-50 border border-amber-100 rounded-sm">
+            <p class="text-[10px] font-bold text-amber-700 uppercase mb-1">⚠️ Admin Access</p>
+            <p class="text-xs text-amber-800">To edit this board later on another device, use the password you created. Don't share it!</p>
+          </div>
+          
+          <button @click="showShareModal = false" class="w-full p-3 bg-slate-800 text-white text-xs font-bold uppercase tracking-wider rounded-sm">Done</button>
+        </div>
+      </div>
+    </div>
+
     <main class="flex-1 flex flex-col bg-slate-200 overflow-hidden relative">
       
-      <!-- Fixed Tooltip at Top-Left of Canal Area -->
-      <div class="absolute top-4 left-4 z-50 pointer-events-none transition-all duration-200"
-           :class="[getHoveredEntity ? 'opacity-100 translate-y-0' : 'opacity-0 -translate-y-2']">
-         <div v-if="getHoveredEntity" class="bg-slate-800 text-white px-4 py-2 rounded-sm shadow-xl flex items-center gap-3 border border-slate-700">
-            <div :class="entityDefs[getHoveredEntity.type].class" class="w-6 h-6 flex items-center justify-center rounded-sm shadow-sm ring-1 ring-white/20">
-               <span class="text-xs">{{ entityDefs[getHoveredEntity.type].icon }}</span>
-               <span v-if="getHoveredEntity.cityNumber" class="text-[8px] font-bold text-slate-800/80 ml-0.5">{{ getHoveredEntity.cityNumber }}</span>
-            </div>
-            <span class="text-xs font-bold uppercase tracking-widest">{{ getHoveredEntity.name || entityDefs[getHoveredEntity.type].label }}</span>
-         </div>
-      </div>
+
 
       <!-- Zoom Controls -->
       <div class="fixed bottom-24 right-4 flex flex-col gap-2 z-40">
@@ -335,10 +475,10 @@ const zoomOut = () => { if(viewportScale.value > 0.5) viewportScale.value -= 0.1
          <button @click="zoomOut" class="w-10 h-10 bg-white border border-slate-200 shadow-sm rounded-sm flex items-center justify-center font-bold text-lg hover:bg-slate-50 transition-colors">-</button>
       </div>
 
-      <!-- Isometric Container (Less perspective) -->
-      <div class="flex-1 w-full overflow-auto flex items-center justify-center p-12 lg:p-24 hide-scrollbar scroll-smooth perspective-3d">
-          <div class="relative transition-transform duration-300 ease-out isometric-ground"
-               :style="{ transform: `scale(${viewportScale}) rotateX(45deg) rotateZ(45deg)` }">
+      <!-- Board Container (Top-down view) -->
+      <div class="flex-1 w-full overflow-auto flex items-center justify-center p-12 lg:p-24 hide-scrollbar scroll-smooth">
+          <div class="relative transition-transform duration-300 ease-out"
+               :style="{ transform: `scale(${viewportScale})` }">
                
                <div class="grid relative bg-white border border-slate-300 select-none touch-none shadow-[15px_15px_30px_rgba(0,0,0,0.05)]"
                     :style="{ gridTemplateColumns: `repeat(${boardSize}, minmax(0, 1fr))`, gridTemplateRows: `repeat(${boardSize}, minmax(0, 1fr))`, width: '1000px', height: '1000px', flexShrink: 0 }">
@@ -395,10 +535,20 @@ const zoomOut = () => { if(viewportScale.value > 0.5) viewportScale.value -= 0.1
                             @click.stop="selectEntity(ent.id)"
                             @mouseenter="hoveredEntityId = ent.id"
                             @mouseleave="hoveredEntityId = null"
-                            :class="[entityDefs[ent.type].class, 'w-full h-full flex flex-col items-center justify-center cursor-move pointer-events-auto border-2 transition-transform active:scale-95', selectedEntityId === ent.id ? 'border-emerald-500 scale-105 z-50' : 'border-transparent']">
+                            :class="[entityDefs[ent.type].class, 'w-full h-full flex flex-col items-center justify-center cursor-move pointer-events-auto border-2 transition-transform active:scale-95 relative group', selectedEntityId === ent.id ? 'border-emerald-500 scale-105 z-50' : 'border-transparent']">
                         
+                        <!-- Entity Tooltip -->
+                        <div v-if="getHoveredEntity?.id === ent.id" 
+                             class="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 z-50 pointer-events-none">
+                            <div class="bg-slate-800 text-white px-3 py-1.5 rounded-sm shadow-xl flex items-center gap-2 border border-slate-700 whitespace-nowrap">
+                                <span class="text-[10px] font-bold uppercase tracking-widest">{{ ent.name || entityDefs[ent.type].label }}</span>
+                            </div>
+                            <!-- Tooltip Arrow -->
+                            <div class="w-2 h-2 bg-slate-800 border-r border-b border-slate-700 rotate-45 mx-auto -mt-1"></div>
+                        </div>
+
                         <!-- Content stay flat-ish but recognizable -->
-                        <div class="flex flex-col items-center justify-center transform-gpu anti-iso">
+                        <div class="flex flex-col items-center justify-center transform-gpu">
                             <span v-if="entityDefs[ent.type].icon" :class="[entityDefs[ent.type].w >= 2 ? 'text-2xl' : 'text-xs']">{{ entityDefs[ent.type].icon }}</span>
                             <span v-if="ent.cityNumber" class="font-bold text-slate-800/60 z-10" :class="[entityDefs[ent.type].w >= 2 ? 'text-xs' : 'text-[8px]']">#{{ ent.cityNumber }}</span>
                         </div>
@@ -454,18 +604,7 @@ const zoomOut = () => { if(viewportScale.value > 0.5) viewportScale.value -= 0.1
 .hide-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
 .hide-scrollbar::-webkit-scrollbar { display: none; }
 
-.perspective-3d {
-    perspective: 3000px;
-}
 
-.isometric-ground {
-    transform-style: preserve-3d;
-}
-
-/* Updated Billboard: Adjust to the less aggressive rotation */
-.anti-iso {
-    transform: rotateZ(-45deg) rotateX(-45deg);
-}
 
 input[type=range]::-webkit-slider-thumb {
   height: 14px;
