@@ -202,24 +202,12 @@ const handleDragStartBoard = (e: DragEvent, id: string) => {
   }
 }
 
-const handleDragOver = (e: DragEvent, x: number, y: number) => {
+const handleDrop = (e: DragEvent) => {
   e.preventDefault()
-  if (e.dataTransfer) {
-     e.dataTransfer.dropEffect = 'move'
-     dragX.value = x
-     dragY.value = y
-  }
-}
-
-const handleDragEnd = () => {
-    dragX.value = null
-    dragY.value = null
-    dragType.value = null
-    dragMoveId.value = null
-}
-
-const handleDrop = (e: DragEvent, x: number, y: number) => {
-  e.preventDefault()
+  const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
+  const x = Math.floor(((e.clientX - rect.left) / rect.width) * boardWidth)
+  const y = Math.floor(((e.clientY - rect.top) / rect.height) * boardHeight)
+  
   const action = e.dataTransfer?.getData('action')
   if (action === 'create') {
     const type = e.dataTransfer?.getData('type') as EntityType
@@ -229,6 +217,24 @@ const handleDrop = (e: DragEvent, x: number, y: number) => {
     if (id) moveEntity(id, x, y)
   }
   handleDragEnd()
+}
+
+const handleDragOver = (e: DragEvent) => {
+  e.preventDefault()
+  if (e.dataTransfer) {
+     e.dataTransfer.dropEffect = 'move'
+     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
+     dragX.value = Math.floor(((e.clientX - rect.left) / rect.width) * boardWidth)
+     dragY.value = Math.floor(((e.clientY - rect.top) / rect.height) * boardHeight)
+  }
+}
+
+const clickGridContainer = (e: MouseEvent) => {
+  const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
+  const x = Math.floor(((e.clientX - rect.left) / rect.width) * boardWidth)
+  const y = Math.floor(((e.clientY - rect.top) / rect.height) * boardHeight)
+  const clickedId = gridCellsMap.value[`${x},${y}`] || null
+  selectEntity(clickedId)
 }
 
 // Mobile Viewport Controls
@@ -309,9 +315,11 @@ const handleKeyDown = (e: KeyboardEvent) => {
   }
 }
 
-const clickGridCell = (x: number, y: number) => {
-  const clickedId = gridCellsMap.value[`${x},${y}`] || null
-  selectEntity(clickedId)
+const handleDragEnd = () => {
+    dragX.value = null
+    dragY.value = null
+    dragType.value = null
+    dragMoveId.value = null
 }
 
 const currentConfigId = ref<string | null>(null)
@@ -601,14 +609,12 @@ const zoomOut = () => { if(viewportScale.value > 0.5) viewportScale.value -= 0.1
                <div class="grid relative bg-white border border-slate-300 select-none touch-none shadow-[15px_15px_30px_rgba(0,0,0,0.05)] pointer-events-auto"
                     :style="{ gridTemplateColumns: `repeat(${boardWidth}, minmax(0, 1fr))`, gridTemplateRows: `repeat(${boardHeight}, minmax(0, 1fr))`, width: '1333px', height: '1000px', flexShrink: 0 }">
                 
-                <!-- Grid Background -->
-                <div v-for="index in boardWidth * boardHeight" :key="`cell-${index}`"
-                    @dragover="handleDragOver($event, (index - 1) % boardWidth, Math.floor((index - 1) / boardWidth))" 
-                    @drop="handleDrop($event, (index - 1) % boardWidth, Math.floor((index - 1) / boardWidth))"
-                    @click="clickGridCell((index - 1) % boardWidth, Math.floor((index - 1) / boardWidth))"
-                    class="border-r border-b border-slate-50 bg-transparent relative box-border hover:bg-slate-50/50 transition-colors"
-                    :class="{'border-l border-t': index === 1, 'border-l-0': (index - 1) % boardWidth !== 0, 'border-t-0': Math.floor((index - 1) / boardWidth) !== 0}">
-                </div>
+                <div 
+                    class="absolute inset-0 select-none touch-none pointer-events-auto grid-background"
+                    @dragover="handleDragOver" 
+                    @drop="handleDrop"
+                    @click="clickGridContainer"
+                ></div>
 
                 <!-- Preview Layer -->
                 <div v-if="dragX !== null && dragY !== null && dragType"
@@ -637,7 +643,7 @@ const zoomOut = () => { if(viewportScale.value > 0.5) viewportScale.value -= 0.1
 
                 <!-- Entities -->
                 <div v-for="ent in entities" :key="ent.id" 
-                    class="absolute p-[1px] transition-all transform-gpu pointer-events-none"
+                    class="absolute p-[1px] transition-all transform-gpu pointer-events-none will-change-transform"
                     :style="{ 
                         left: `${(ent.x / boardWidth) * 100}%`, 
                         top: `${(ent.y / boardHeight) * 100}%`, 
@@ -748,5 +754,16 @@ input[type=range]::-webkit-slider-thumb {
 
 .grid > div {
     backface-visibility: hidden;
+}
+
+.grid-background {
+    background-image: 
+        linear-gradient(to right, #f1f5f9 1px, transparent 1px),
+        linear-gradient(to bottom, #f1f5f9 1px, transparent 1px);
+    background-size: calc(100% / 40) calc(100% / 30);
+}
+
+.will-change-transform {
+    will-change: transform;
 }
 </style>
